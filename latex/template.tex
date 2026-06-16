@@ -1,0 +1,114 @@
+%! suppress = MissingImport
+\documentclass[10pt, letterpaper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────────
+\usepackage[T1]{fontenc}
+\usepackage{ebgaramond}          % Garamond body font
+\usepackage[margin=0.5in, top=0.47in, bottom=0.4in]{geometry}
+\usepackage{enumitem}            % tight bullet lists
+\usepackage{hyperref}            % clickable links
+\usepackage[dvipsnames]{xcolor}
+\usepackage{microtype}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{booktabs}
+
+% ── Hyperlink style ───────────────────────────────────────────────────────────
+\hypersetup{
+  colorlinks=true,
+  urlcolor=[HTML]{0563C1},
+  linkcolor=black
+}
+
+% ── Section header command ────────────────────────────────────────────────────
+\newcommand{\ressection}[1]{%
+  \noindent{\large\bfseries\scshape #1}\par%
+  \vspace{1pt}%
+  \hrule height 0.4pt%
+  \vspace{3pt}%
+}
+
+% ── Job entry command: \jobentry{Role}{Company}{Date} ─────────────────────────
+\newcommand{\jobentry}[3]{%
+  \noindent\textbf{#1} \textbar{} \textit{#2}\hfill #3\par\vspace{-2pt}%
+}
+
+% ── Education entry: \eduentry{Institution}{Degree}{Date} ─────────────────────
+\newcommand{\eduentry}[3]{%
+  \noindent
+  \textbf{#1} \textperiodcentered{} #2\hfill #3\\
+}
+
+% ── Bullet list settings ──────────────────────────────────────────────────────
+\newenvironment{bullets}{%
+  \begin{itemize}[
+    leftmargin=0.125in,
+    itemsep=0pt,
+    parsep=0pt,
+    topsep=0pt,
+    partopsep=0pt,
+    label=\textbullet
+  ]
+}{%
+  \end{itemize}
+}
+
+% ── Suppress page numbers ─────────────────────────────────────────────────────
+\pagestyle{empty}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+
+% ── Header ───────────────────────────────────────────────────────────────────
+% FILL IN: Replace all placeholders below with your personal information
+\begin{center}
+  {\fontsize{15}{18}\selectfont\bfseries\fontfamily{ptm}\selectfont [FULL NAME]}\\[3pt]
+  [City, State] \textperiodcentered{}
+  [(XXX)XXX-XXXX] \textperiodcentered{}
+  \href{mailto:[your@email.com]}{[your@email.com]} \textperiodcentered{}
+  \href{https://www.linkedin.com/in/[handle]/}{linkedin.com/in/[handle]/} \textperiodcentered{}
+  \href{https://github.com/[handle]}{github.com/[handle]}
+\end{center}
+
+\vspace{2pt}
+% ── Education ────────────────────────────────────────────────────────────────
+% FILL IN: Add your degrees. Repeat \eduentry for each degree.
+\ressection{Education}
+
+\eduentry{[University Name]}{[Degree, e.g. MSc Applied Data Science]}{[Month YYYY] -- [Month YYYY]}
+\noindent Coursework: [Course 1, Course 2, Course 3, ...]
+
+\eduentry{[University Name]}{[Degree, e.g. BEng Computer Science]}{[Month YYYY] -- [Month YYYY]}
+\par\vspace{-8pt}
+
+% ── Technical Skills ─────────────────────────────────────────────────────────
+% FILL IN: Update with your actual skills. The skill rewrites this section per run.
+\ressection{Technical Skills}
+
+\noindent \textbf{Languages:} [Python, SQL, R, ...]\\
+\noindent \textbf{Analytics \& BI:} [Tableau, Power BI, KPI Design, ...]\\
+\noindent \textbf{Data Platforms \& Tools:} [Databricks, Snowflake, ...]\\
+\noindent \textbf{Statistical Methods:} [Hypothesis Testing, ...]
+
+\vspace{4pt}
+% ── Work Experience ───────────────────────────────────────────────────────────
+% NOTE: The skill generates this section fresh each run from your experience files.
+% The entries below are examples of the format — replace with your own or leave
+% as a reference. The skill will overwrite output.tex with tailored content.
+\ressection{Work Experience}
+
+\jobentry{[Job Title]}{\fontfamily{ptm}\selectfont [Company Name]}{[Month YYYY] -- [Month YYYY]}
+\begin{bullets}
+  \item [Bullet: action verb + technical method + quantified business outcome]
+  \item [Bullet: action verb + technical method + quantified business outcome]
+  \item [Bullet: action verb + technical method + quantified business outcome]
+\end{bullets}
+
+\vspace{3pt}
+\jobentry{[Job Title]}{\fontfamily{ptm}\selectfont [Company Name]}{[Month YYYY] -- [Month YYYY]}
+\begin{bullets}
+  \item [Bullet: action verb + technical method + quantified business outcome]
+  \item [Bullet: action verb + technical method + quantified business outcome]
+\end{bullets}
+
+\end{document}
