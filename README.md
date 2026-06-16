@@ -100,23 +100,54 @@ V2 adds a persistent, linked workspace where JDs, resumes, and prep notes are al
 
 ### JD Capture via Web Clipper
 
-Install the **Obsidian Web Clipper** browser extension (Chrome/Firefox). Configure one template per job board to auto-populate frontmatter fields (company, role, URL, date). Supported domains: `linkedin.com`, `greenhouse.io`, `lever.co`, `workday.com`, `jobs.ashbyhq.com`.
+Instead of pasting job descriptions manually, use **Obsidian Web Clipper** to save a JD from your browser directly into your vault in one click.
 
-Clipped JDs save to `~/Documents/JobSearch/JDs/` with metadata pre-filled. See `vault_template/JDs/example_jd.md` for the expected frontmatter format.
+**Install:**
+1. Go to [obsidian.md/clipper](https://obsidian.md/clipper) and install the Chrome or Firefox extension
+2. Pin it to your browser toolbar
 
-### How Artifacts Connect
+**Create a template (do this once):**
+1. Click the Web Clipper extension icon → open **Settings** (gear icon)
+2. Go to **Templates** → click **New template**
+3. Set **Name:** `Job Application`
+4. Set **Vault:** `JobSearch`
+5. Set **Note location:** `JDs`
+6. Set **Note name:** `{{date:YYYYMMDD}}_{{title}}`
+7. Paste this into the **Properties** section:
 
-Each Application note (auto-created by the skill) links back to the source JD and compiled PDF:
+```
+company: {{prompt:Company name}}
+role: {{prompt:Job title}}
+url: {{url}}
+date_saved: {{date:YYYY-MM-DD}}
+status: Unprocessed
+```
+
+8. In the **Content** field, set it to `{{content}}` to capture the full JD text
+9. Save the template
+
+**To clip a JD:**
+1. Open any job posting (LinkedIn, Greenhouse, Lever, Workday, Ashby, etc.)
+2. Click the Web Clipper icon → select the **Job Application** template
+3. Fill in company and role when prompted → click **Save**
+4. The JD lands in `~/Documents/JobSearch/JDs/` with frontmatter pre-filled
+
+Then pass the saved file to the skill: `/resume-builder ~/Documents/JobSearch/JDs/[filename].md`
+
+### Navigating Artifacts: Graph View and Tracker
+
+The skill links each Application note back to its source JD and compiled resume using Obsidian wikilinks:
 
 ```yaml
 jd_note: "[[JDs/Acme_DataAnalyst_20260615]]"
 resume:  "[[Resumes/YourName_Resume_Acme_DataAnalyst_20260615.pdf]]"
 ```
 
-In Obsidian:
-- **Graph view** — clusters of similar applications group visually by role type and shared keywords; JD → Application → Resume edges are traversable
-- **Dataview table** (`Tracker.md`) — all applications in one board with one-click access to each artifact
-- **Local graph** — open any Application note to see its connected JD, resume, and related applications of the same type
+**Graph view (built-in, no plugins):** Open **Graph view** from the left sidebar (Ctrl/Cmd+G). Each Application note appears as a node connected to its JD and resume. Applications of the same role type cluster together — visually showing which companies are in the same search track. Click any node to open that file.
+
+**Local graph:** Open any Application note → click the graph icon in the top-right corner. Shows only that note's direct connections: its JD, resume, and any related applications that share keywords.
+
+**Tracker table (requires Dataview plugin):** `Tracker.md` uses the [Dataview](https://github.com/blacksmithgu/obsidian-dataview) community plugin to render a live table of all applications sorted by date, with clickable links to each JD and resume. To enable it: Settings → Community plugins → Browse → search "Dataview" → Install → Enable. If you prefer not to use plugins, delete `Tracker.md` and rely on graph view alone — nothing else depends on it.
 
 Update the `status` field in each Application note manually as you progress:
 `Researching` → `Applied` → `Phone Screen` → `Interview` → `Offer` / `Rejected`
