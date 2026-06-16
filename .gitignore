@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Resume Builder — personal data
+# Use experience/example_company.md as your template; your actual bullet files stay local
+experience/*.md
+!experience/example_company.md
+
+# Auto-generated per-run LaTeX resume output — never committed
+latex/output.tex
