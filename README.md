@@ -76,3 +76,6 @@ The files in `roles/` contain ATS rules, keyword signals, and writing style guid
 - **ATS signals** — add or remove domain-specific phrases for your industry
 - **Stack lists** — update to reflect tools common in your target market
 - **Writing style** — the default uses Paul Graham plain-language principles; adjust if your industry expects different register
+
+## View your latex resume
+If you want to preview your latex code before running to skill (to save token, and for modification) you can use https://www.overleaf.com/ for free preview and edit features. Once you are satisfied with the version of resume, put that latex code into `template.tex` and you are good to go.
