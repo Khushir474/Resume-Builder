@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.khushi.resumebuilder</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/khushir/.claude/skills/resume-builder/scripts/kqueue_watcher.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/khushir</string>
+        <key>USER</key>
+        <string>khushir</string>
+        <key>PATH</key>
+        <string>/Applications/c11.app/Contents/Resources/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/khushir/.claude/skills/resume-builder/scripts/auto_resume.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/khushir/.claude/skills/resume-builder/scripts/auto_resume.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
