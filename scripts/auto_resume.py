@@ -10,9 +10,11 @@ import re
 import json
 import subprocess
 import datetime
+import time
 import sys
 import tempfile
 import urllib.parse
+from contextlib import contextmanager
 from pathlib import Path
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -40,6 +42,22 @@ COUNCIL_KEYWORDS_TMPL = PROMPTS_DIR / "council_keywords_prompt.md"
 CLAUDE_BIN  = "/Applications/c11.app/Contents/Resources/bin/claude"
 SKIP_FILES  = {"example_jd.md"}
 VALID_TYPES = {"AIMLEngineer", "DataScientist", "DataAnalyst", "ProductAnalyst"}
+RUNS_LOG    = SCRIPTS_DIR / "runs.jsonl"
+
+
+# ── Structured logger ──────────────────────────────────────────────────────────
+def slog(record: dict):
+    record["ts"] = datetime.datetime.now().isoformat(timespec="seconds")
+    with RUNS_LOG.open("a") as f:
+        f.write(json.dumps(record) + "\n")
+
+@contextmanager
+def timed(step: str, meta: dict | None = None):
+    t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        slog({"event": "step", "step": step, "dur_s": round(time.monotonic() - t0, 2), **(meta or {})})
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -134,9 +152,14 @@ def get_unprocessed(state):
 
 
 # ── Claude calls ───────────────────────────────────────────────────────────────
-def call_claude(prompt, timeout=60, model=None):
+def call_claude(prompt, timeout=60, model=None, _step=None):
     env = os.environ.copy()
     env["HOME"] = str(HOME)
+    # Ensure both the c11 wrapper dir and the real claude binary dir are in PATH.
+    # The c11 wrapper (CLAUDE_BIN) skips its own dir and searches PATH for the
+    # actual claude binary — ~/.local/bin/claude — so both must be present.
+    extra = f"{Path(CLAUDE_BIN).parent}:{HOME / '.local/bin'}"
+    env["PATH"] = f"{extra}:{env.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
     args = [
         CLAUDE_BIN, "--print",
         "--permission-mode", "bypassPermissions",
@@ -145,7 +168,18 @@ def call_claude(prompt, timeout=60, model=None):
     if model:
         args += ["--model", model]
     args.append(prompt)
+    t0 = time.monotonic()
     result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env)
+    dur = round(time.monotonic() - t0, 2)
+    slog({
+        "event":       "claude_call",
+        "step":        _step or "unknown",
+        "model":       model or "sonnet",
+        "in_tok_est":  len(prompt) // 4,
+        "out_tok_est": len(result.stdout) // 4,
+        "dur_s":       dur,
+        "status":      "ok" if result.returncode == 0 else f"err:{result.returncode}",
+    })
     if result.returncode != 0:
         raise RuntimeError(f"Claude exited {result.returncode}:\n{result.stderr[:800]}")
     return result.stdout.strip()
@@ -244,7 +278,7 @@ def council_classify(jd_body, config):
     prompt   = template.replace("<<<JD_EXCERPT>>>", jd_body[:2000])
 
     def _classify_one(i):
-        raw  = call_claude(prompt, timeout=60, model=model)
+        raw  = call_claude(prompt, timeout=60, model=model, _step="council_classify")
         return i, parse_council_classify_response(raw)
 
     votes = []
@@ -330,7 +364,7 @@ def council_evaluate_keywords(keywords_a, keywords_b, jd_body, config):
     )
 
     def _keywords_one(i):
-        raw  = call_claude(prompt, timeout=timeout, model=model)
+        raw  = call_claude(prompt, timeout=timeout, model=model, _step="council_keywords")
         return i, parse_council_keywords_response(raw)
 
     votes = []
@@ -530,17 +564,21 @@ def log(msg):
 # ── Main pipeline ──────────────────────────────────────────────────────────────
 def process_jd(jd_path, config):
     log(f"Processing: {jd_path.name}")
+    run_start = time.monotonic()
 
     text         = jd_path.read_text()
     meta, body   = parse_frontmatter(text)
     company      = meta.get("company", "Unknown")
     company_slug = re.sub(r'[^a-zA-Z0-9]', '', company) or "Unknown"
 
+    slog({"event": "run_start", "jd": jd_path.name, "company": company,
+          "role": meta.get("role", "Unknown")})
     notify_start(company, jd_path.name)
 
     # Step 1 — council classify
     log("Council classifying role type...")
-    role_type, prompted = council_classify(body, config)
+    with timed("council_classify"):
+        role_type, prompted = council_classify(body, config)
     log(f"Role type: {role_type}" + (" (user-confirmed)" if prompted else " (auto)"))
 
     # Step 2 — archetype or experience files
@@ -569,7 +607,8 @@ def process_jd(jd_path, config):
         .replace("<<<ROLE_REQUIREMENTS>>>",  role_requirements)
         .replace("<<<EXPERIENCE_CONTENT>>>", experience_content)
     )
-    response = call_claude(prompt, timeout=600)
+    with timed("headless_write"):
+        response = call_claude(prompt, timeout=600, _step="headless_write")
 
     # Step 5 — parse structured output
     keywords_a   = [k.strip() for k in extract_block(response, "KEYWORDS_A").split(",") if k.strip()]
@@ -580,12 +619,14 @@ def process_jd(jd_path, config):
 
     # Step 5.5 — council evaluate keywords
     log("Council evaluating keywords...")
-    keywords_a, keywords_b = council_evaluate_keywords(keywords_a, keywords_b, body, config)
+    with timed("council_keywords"):
+        keywords_a, keywords_b = council_evaluate_keywords(keywords_a, keywords_b, body, config)
 
     # Step 6 — compile PDF
     write_output_tex(skills_tex, work_tex)
     log("Building PDF...")
-    pdf_path = build_pdf(company_slug, role_type)
+    with timed("pdf_build"):
+        pdf_path = build_pdf(company_slug, role_type)
     log(f"PDF → {pdf_path}")
     pages = _count_pdf_pages(pdf_path)
     if pages and pages > 1:
@@ -598,16 +639,74 @@ def process_jd(jd_path, config):
     # Step 7b — append to tracker CSV
     save_tracker_csv(meta, role_type, keywords_a, keywords_b, extrapolated)
 
+    total_s = round(time.monotonic() - run_start, 2)
+    slog({"event": "run_complete", "jd": jd_path.name, "company": company,
+          "role_type": role_type, "total_s": total_s, "pdf": pdf_path,
+          "pages": pages, "kw_a": len(keywords_a), "kw_b": len(keywords_b)})
+    log(f"Done in {total_s}s")
+
     # Step 8 — notify
     notify(company, pdf_path)
 
     return pdf_path
 
 
+def print_stats():
+    if not RUNS_LOG.exists():
+        print("No runs logged yet.")
+        return
+    rows = [json.loads(l) for l in RUNS_LOG.read_text().splitlines() if l.strip()]
+
+    runs     = [r for r in rows if r["event"] == "run_complete"]
+    calls    = [r for r in rows if r["event"] == "claude_call"]
+    steps    = [r for r in rows if r["event"] == "step"]
+
+    print(f"\n{'─'*60}")
+    print(f"  Resume Builder — run stats  ({len(runs)} completed runs)")
+    print(f"{'─'*60}")
+
+    if runs:
+        for r in runs[-10:]:          # last 10 runs
+            print(f"\n  {r['ts']}  {r['company']} ({r['role_type']})")
+            print(f"    total: {r['total_s']}s   pdf: {r.get('pages','?')}p   "
+                  f"keywords: {r.get('kw_a',0)}A + {r.get('kw_b',0)}B")
+            # matching step records for this run
+            run_steps = [s for s in steps if s["ts"] <= r["ts"] and
+                         s["step"] in ("council_classify","headless_write","council_keywords","pdf_build")]
+            for s in run_steps:
+                print(f"    {s['step']:25s} {s['dur_s']:6.1f}s")
+
+    print(f"\n{'─'*60}")
+    print(f"  Claude calls breakdown")
+    print(f"{'─'*60}")
+    by_step: dict = {}
+    for c in calls:
+        k = (c["step"], c["model"])
+        if k not in by_step:
+            by_step[k] = {"n": 0, "dur": 0.0, "in_tok": 0, "out_tok": 0, "err": 0}
+        by_step[k]["n"]      += 1
+        by_step[k]["dur"]    += c["dur_s"]
+        by_step[k]["in_tok"] += c.get("in_tok_est", 0)
+        by_step[k]["out_tok"]+= c.get("out_tok_est", 0)
+        if c["status"] != "ok":
+            by_step[k]["err"] += 1
+    for (step, model), v in sorted(by_step.items()):
+        avg = v["dur"] / v["n"] if v["n"] else 0
+        print(f"  {step:25s} {model:30s}  n={v['n']:3d}  "
+              f"avg={avg:5.1f}s  "
+              f"in≈{v['in_tok']:6d}tok  out≈{v['out_tok']:5d}tok  "
+              f"err={v['err']}")
+    print()
+
+
 def main():
     force_path = None
-    if len(sys.argv) > 1 and sys.argv[1] not in ("--reset",):
+    if len(sys.argv) > 1 and sys.argv[1] not in ("--reset", "--stats"):
         force_path = Path(sys.argv[1]).expanduser()
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--stats":
+        print_stats()
+        return
 
     if len(sys.argv) > 1 and sys.argv[1] == "--reset":
         target = sys.argv[2] if len(sys.argv) > 2 else None

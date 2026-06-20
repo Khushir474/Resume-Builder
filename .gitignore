@@ -233,6 +233,7 @@ latex/*.pdf
 # Auto-pipeline runtime files
 scripts/.processed_jds.json
 scripts/auto_resume.log
+scripts/runs.jsonl
 
 # Obsidian vault — data files, not tracked here
 # Vault lives at ~/JobSearch; vault_template/ holds the sanitized scaffold
