@@ -227,11 +227,16 @@ latex/output.tex
 latex/output.aux
 latex/output.log
 latex/output.out
+latex/output.out
 latex/*.pdf
 
 # Auto-pipeline runtime files
 scripts/.processed_jds.json
 scripts/auto_resume.log
+
+# Obsidian vault — data files, not tracked here
+# Vault lives at ~/JobSearch; vault_template/ holds the sanitized scaffold
+*.obsidian/
 
 # macOS / editor
 .DS_Store

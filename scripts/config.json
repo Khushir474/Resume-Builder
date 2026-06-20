@@ -1,4 +1,7 @@
 {
+  "council_size": 3,
+  "council_model": "claude-haiku-4-5-20251001",
+  "council_keywords_timeout": 120,
   "always_load": ["itradenetwork", "lia", "digitas"],
   "optional_fourth": {
     "lexlead_ai": [

@@ -4,188 +4,300 @@ A Claude Code skill that tailors a resume to a job description — ATS-optimized
 
 ---
 
-## How it works
+## Modes
 
-**Interactive mode** (`/resume-builder`): guided flow with two confirmation gates — role type and keyword review — before writing the resume.
-
-**Auto mode** (launchd watcher): drop a `.md` file into `JDs/`, walk away. Pipeline runs in the background:
-1. Parses JD frontmatter (company, role, date)
-2. Classifies role type via a lightweight Claude micro-call
-3. Loads the relevant role ATS rules and experience files
-4. Writes the full resume in one headless Claude call (no gates)
-5. Compiles PDF via pdflatex
-6. Saves an Application note to the vault
-7. Fires a macOS system notification when done
-
-**Compile mode** (`/resume-builder --compile [RoleType]`): reads all Application notes for a role type and writes an Archetype summary — a cached keyword + experience profile that future runs load instead of the raw experience files, cutting input tokens significantly.
+| Mode | Trigger | Gates |
+|---|---|---|
+| **Interactive** | `/resume-builder` or `/resume-builder path/to/jd.md` | Role type + keyword review (manual) |
+| **Auto** | Drop `.md` into `~/JobSearch/JDs/` | Council-gated — auto or notify based on confidence |
+| **Compile** | `/resume-builder --compile [RoleType]` | None — reads past applications, writes archetype |
 
 ---
 
-## Prerequisites
+## Auto mode pipeline
 
-- Claude Code (CLI)
-- macOS (launchd, osascript for notifications)
-- A full LaTeX install with `pdflatex` at `/Library/TeX/texbin/pdflatex`
-- An Obsidian vault at `~/Documents/JobSearch/` with the structure below
+```
+  JD file dropped into ~/JobSearch/JDs/
+           │
+           ▼
+    Parse frontmatter
+    (company, role, date)
+    ┌─ Company extraction ────────────────────────────────┐
+    │  title: "Role at Company"  →  split on " at "       │
+    │  source: jobs.ashbyhq.com/{co}/...  →  co           │
+    │  source: jobs.lever.co/{co}/...     →  co           │
+    │  source: boards.greenhouse.io/{co}  →  co           │
+    │  source: {co}.myworkdayjobs.com/... →  co           │
+    └─────────────────────────────────────────────────────┘
+           │
+           ▼
+   macOS popup: "Resume Builder — Starting for {Company}"
+           │
+           ▼
+  ┌────────────────────────────────────┐
+  │       Classification Council       │
+  │   3 × Haiku calls  (parallel)      │
+  │                                    │
+  │   each returns:                    │
+  │     ROLE_TYPE  · EVIDENCE_FOR      │
+  │     EVIDENCE_AGAINST · CONFIDENCE  │
+  └───────────────┬────────────────────┘
+                  │
+         ┌────────┴─────────┐
+         │ All agree +      │
+         │ ≥ 2 HIGH conf?   │
+         └────────┬─────────┘
+          YES     │     NO
+           │      └──► macOS dialog — recommendation + evidence
+           │           user confirms or picks different type
+           ▼
+       Load archetype (if exists for role type)
+       else load experience files
+           │
+           ▼
+  ┌────────────────────────────────────┐
+  │      Headless Claude call          │
+  │      (Sonnet — main model)         │
+  │                                    │
+  │  outputs: KEYWORDS_A · KEYWORDS_B  │
+  │           SKILLS LaTeX             │
+  │           WORK_EXPERIENCE LaTeX    │
+  │           EXTRAPOLATED table       │
+  └───────────────┬────────────────────┘
+                  │
+                  ▼
+  ┌────────────────────────────────────┐
+  │        Keywords Council            │
+  │   3 × Haiku calls  (parallel)      │
+  │                                    │
+  │   each returns:                    │
+  │     APPROVED · MISSING_HARD        │
+  │     MISSING_SOFT · CONFIDENCE      │
+  └───────────────┬────────────────────┘
+                  │
+         ┌────────┴─────────┐
+         │ All approved +   │
+         │ ≥ 2 HIGH conf?   │
+         └────────┬─────────┘
+          YES     │     NO
+           │      └──► macOS dialog — missing keywords
+           │           user adds or skips
+           ▼
+        Compile PDF  (pdflatex)
+        Warn in log if > 1 page
+           │
+           ├──► ~/JobSearch/Resumes/{Company}_{Type}_{Date}.pdf
+           ├──► ~/JobSearch/Applications/{Company}_{Type}_{Date}.md
+           ├──► ~/JobSearch/tracker.csv  (row appended)
+           └──► macOS popup: "Resume Ready — {Company}"
+```
+
+---
+
+## Council decision logic
+
+Both councils (classification and keywords) use the same aggregation:
+
+| All 3 agree? | HIGH votes | Confidence | Action |
+|:---:|:---:|---|---|
+| Yes | ≥ 2 | HIGH | Auto-proceed silently |
+| Yes | 1 | MEDIUM | Show dialog with recommendation |
+| Yes | 0 | LOW | Show dialog with recommendation |
+| No | any | LOW | Show dialog with vote breakdown |
+
+---
+
+## Role classification
+
+| Label | Core signals |
+|---|---|
+| **AIMLEngineer** | MLOps · inference pipelines · model deployment · LLMOps · latency · scale |
+| **DataScientist** | Statistical modeling · experiments · feature engineering · A/B testing · predictive accuracy |
+| **DataAnalyst** | SQL · dashboards · KPIs · BI tools · business intelligence · stakeholder reporting |
+| **ProductAnalyst** | Roadmaps · GTM · PDLC · cross-functional execution · sprint coordination |
+
+---
+
+## Experience file selection
+
+Three files always load. One optional 4th by JD domain:
+
+```
+Always loaded
+  ├── itradenetwork.md
+  ├── lia.md
+  └── digitas.md
+
+Optional 4th (first match wins)
+  ├── lexlead_ai.md    ← llm, rag, agentic, mlops, modeling, genai, vector, embedding
+  ├── teksystems.md    ← nlp, text processing, document processing, ocr
+  └── galaara.md       ← product, gtm, marketing, customer analytics, growth, retention
+```
+
+After 3+ applications of the same role type, run `--compile` to build an archetype. Future runs load the archetype instead, skipping raw experience files.
 
 ---
 
 ## Vault structure
 
 ```
-~/Documents/JobSearch/
-├── JDs/              ← drop job descriptions here (.md files)
-├── Applications/     ← auto-generated per-application notes
-├── Archetypes/       ← compiled role summaries (from --compile)
-└── Resumes/          ← output PDFs
+~/JobSearch/               ← outside ~/Documents to avoid macOS TCC restrictions
+├── JDs/                   ← drop job descriptions here (.md files)
+├── Applications/          ← auto-generated per-application notes
+├── Archetypes/            ← compiled role summaries (from --compile)
+├── Resumes/               ← output PDFs
+└── tracker.csv            ← running log of all applications
 ```
 
-JD files should have YAML frontmatter. Web Clipper format is supported automatically:
+> **Why not `~/Documents`?** macOS TCC restricts `~/Documents` access for background processes. The launchd file watcher needs to read this directory; placing the vault at `~/JobSearch` avoids requiring Full Disk Access grants.
 
+**JD frontmatter** — web clipper format (auto-parsed):
 ```yaml
 ---
-title: Senior Data Scientist at Acme Corp
-source: https://...
+title: Support Operations Data Analyst at Harvey
+source: https://jobs.ashbyhq.com/harvey/...
 created: 2026-06-19
 ---
-[job description text]
 ```
 
-Or explicit fields:
+Or explicit:
 ```yaml
 ---
-company: Acme Corp
-role: Senior Data Scientist
+company: Harvey
+role: Support Operations Data Analyst
 ---
-[job description text]
 ```
 
 ---
 
-## Skill structure
+## Repo structure
 
 ```
 resume-builder/
-├── SKILL.md                        # interactive orchestration logic
-├── roles/                          # ATS writing rules per role type
+├── skill.md                          # interactive orchestration logic (Claude Code)
+├── roles/                            # ATS writing rules per role type
 │   ├── ai_ml_engineer.md
 │   ├── data_scientist.md
 │   ├── data_analyst.md
 │   └── product_analyst_ops.md
-├── experience/                     # (gitignored) bullet libraries per employer
+├── experience/                       # (gitignored) bullet libraries per employer
+│   └── example_company.md            # template — copy and fill in per employer
 ├── latex/
-│   ├── template.tex                # (gitignored) base template with contact info
-│   ├── build.sh                    # compiles output.tex → PDF
-│   └── output.tex                  # (gitignored) ephemeral per-run file
+│   ├── template.tex                  # base template — fill in contact info and Education
+│   ├── build.sh                      # compiles output.tex → PDF, moves to vault
+│   └── output.tex                    # (gitignored) ephemeral per-run file
 ├── prompts/
-│   ├── classify_prompt.md          # micro-call: returns role type label only
-│   └── headless_prompt.md          # main auto-mode prompt, structured block output
-└── scripts/
-    ├── auto_resume.py              # end-to-end pipeline (called by launchd)
-    ├── config.json                 # experience file selection rules
-    ├── run_auto.sh                 # launchd wrapper (sources shell env)
-    └── setup_watcher.sh            # install / uninstall / test / reset
+│   ├── headless_prompt.md            # main auto-mode prompt — structured block output
+│   ├── council_classify_prompt.md    # classification council (evidence-based CoT)
+│   └── council_keywords_prompt.md    # keyword completeness council
+├── scripts/
+│   ├── auto_resume.py                # end-to-end auto pipeline (called by launchd)
+│   ├── config.json                   # council settings + experience file routing
+│   ├── run_auto.sh                   # launchd wrapper (sources shell env)
+│   └── setup_watcher.sh             # install / uninstall / test / reset watcher
+└── vault_template/                   # sanitized scaffold — copy to ~/JobSearch to start
+    ├── JDs/example_jd.md
+    ├── Applications/
+    ├── Archetypes/
+    ├── Resumes/
+    ├── Tracker.md
+    └── tracker.csv                   # header only — rows appended by auto pipeline
 ```
+
+**What's gitignored:**
+- `experience/*.md` — your actual bullet libraries (personal work history)
+- `latex/output.tex` and build artifacts — ephemeral per-run files
+- `scripts/.processed_jds.json` and `auto_resume.log` — local runtime state
 
 ---
 
 ## Setup
 
-### 1. Set candidate name
-
-Add to `~/.zshrc`:
+**1. Install LaTeX**
 ```bash
-export RESUME_CANDIDATE_NAME="Your Full Name"
+brew install --cask mactex-no-gui
+```
+Requires `pdflatex` at `/Library/TeX/texbin/pdflatex`.
+
+**2. Set up the vault**
+```bash
+cp -r vault_template ~/JobSearch
 ```
 
-This is the only place your name lives — picked up by both the PDF filename and the headless prompt. Not committed.
+**3. Create experience files**
+Copy `experience/example_company.md` for each employer. Name must match the key in `config.json`.
 
-### 2. Create your experience files
+**4. Fill in `latex/template.tex`**
+Add your contact info, LinkedIn, GitHub, and Education section. The pipeline writes only Skills and Work Experience — everything else comes from the template unchanged.
 
-Add one `.md` file per employer to `experience/`. Each file is a bullet library for that role. The pipeline selects 3–4 files per run based on JD domain signals in `config.json`.
-
-### 3. Create your LaTeX template
-
-Copy or write `latex/template.tex` with your contact info in the header. The pipeline writes only the Skills and Work Experience sections; the preamble, name header, and Education section are read from `template.tex` and prepended unchanged.
-
-### 4. Install the file watcher
-
+**5. Install the file watcher**
 ```bash
 bash scripts/setup_watcher.sh install
 ```
-
-This registers a launchd agent that watches `~/Documents/JobSearch/JDs/` and fires the pipeline automatically on any new `.md` file.
+Registers a launchd agent that watches `~/JobSearch/JDs/` and runs the full pipeline when a new `.md` file appears. Also fires every 5 minutes as a fallback.
 
 ---
 
 ## Usage
 
-### Drop a JD (auto mode)
-Save any job description as a `.md` file in `~/Documents/JobSearch/JDs/`. The pipeline starts automatically. Check progress in `scripts/auto_resume.log`.
+```bash
+# Drop a JD — pipeline runs automatically
+cp "role-at-company.md" ~/JobSearch/JDs/
 
-### Run interactively
-```
+# Interactive via Claude Code
 /resume-builder
-/resume-builder path/to/jd.md
-```
+/resume-builder ~/JobSearch/JDs/role.md
 
-### Compile a role archetype
-```
+# Compile archetype (run after 3–5 applications per role type)
 /resume-builder --compile DataScientist
 /resume-builder --compile AIMLEngineer
+
+# Watcher management
+bash scripts/setup_watcher.sh status
+bash scripts/setup_watcher.sh install
+bash scripts/setup_watcher.sh uninstall
+bash scripts/setup_watcher.sh test          # run on latest JD immediately
+bash scripts/setup_watcher.sh reset         # clear all processed state
+bash scripts/setup_watcher.sh reset "file.md"
+
+# Manual run
+python3 scripts/auto_resume.py "/path/to/JDs/role.md"
+
+# Check logs
+tail -f scripts/auto_resume.log
 ```
-Run after every 3–5 applications of the same role type. Future auto runs load the archetype instead of all experience files, reducing tokens significantly.
-
-### Watcher management
-```bash
-bash scripts/setup_watcher.sh status      # check if running
-bash scripts/setup_watcher.sh install     # start watcher
-bash scripts/setup_watcher.sh uninstall   # stop watcher
-bash scripts/setup_watcher.sh test        # run pipeline on latest JD immediately
-bash scripts/setup_watcher.sh reset       # clear all processed state
-bash scripts/setup_watcher.sh reset "filename.md"   # reset one file
-```
-
-### Manual pipeline run
-```bash
-python3 scripts/auto_resume.py "/path/to/JDs/role-at-company.md"
-```
-
----
-
-## Configuration
-
-### `scripts/config.json`
-Controls which experience file is loaded as the optional 4th entry, beyond the three always-loaded. Edit the signal lists here as the job market evolves — no Python changes needed.
-
-```json
-{
-  "always_load": ["employer_a", "employer_b", "employer_c"],
-  "optional_fourth": {
-    "employer_d": ["llm", "rag", "agentic", "mlops"],
-    "employer_e": ["nlp", "text processing"],
-    "employer_f": ["product", "gtm", "marketing"]
-  },
-  "role_files": {
-    "AIMLEngineer": "ai_ml_engineer.md",
-    "DataScientist": "data_scientist.md",
-    "DataAnalyst": "data_analyst.md",
-    "ProductAnalyst": "product_analyst_ops.md"
-  }
-}
-```
-
-### Role classification
-Handled by a lightweight Claude call against the first 1,200 characters of the JD. Returns one of four labels: `AIMLEngineer`, `DataScientist`, `DataAnalyst`, `ProductAnalyst`. Stays current with market language automatically — no keyword lists to maintain.
 
 ---
 
 ## Token cost
 
-| Flow | Claude calls | Approx tokens |
-|---|---|---|
-| Interactive (no archetype) | 3–4 turns | ~8,000–12,000 |
-| Auto (no archetype) | 2 calls | ~4,000–6,000 |
-| Auto (archetype loaded) | 2 calls | ~2,500–4,000 |
+| Step | Calls | Model | When |
+|---|---|---|---|
+| Classification council | 3 parallel | Haiku | Every run |
+| Headless write | 1 | Sonnet | Every run |
+| Keywords council | 3 parallel | Haiku | Every run |
+| **Total — no archetype** | **7** | mixed | ~8,000–10,000 tokens |
+| **Total — archetype loaded** | **7** | mixed | ~5,500–7,000 tokens |
 
-Archetypes are the biggest lever — compile one per role type after 3+ applications.
+Archetypes cut Sonnet input tokens by replacing raw experience files with a pre-distilled keyword + bullet profile.
+
+---
+
+## `config.json` reference
+
+```json
+{
+  "council_size": 3,
+  "council_model": "claude-haiku-4-5-20251001",
+  "council_keywords_timeout": 120,
+  "always_load": ["itradenetwork", "lia", "digitas"],
+  "optional_fourth": { "lexlead_ai": ["llm", "rag", "..."] },
+  "role_files": { "AIMLEngineer": "ai_ml_engineer.md", "...": "..." }
+}
+```
+
+| Key | Effect |
+|---|---|
+| `council_size` | Number of independent council calls per decision (default 3) |
+| `council_model` | Model for council calls — Haiku keeps cost low |
+| `council_keywords_timeout` | Per-call timeout in seconds for keywords council |

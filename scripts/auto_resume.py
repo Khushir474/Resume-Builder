@@ -4,34 +4,41 @@ Auto Resume Builder
 Triggered by launchd when a new .md file appears in ~/Documents/JobSearch/JDs/
 """
 
+import csv
 import os
 import re
 import json
 import subprocess
 import datetime
 import sys
+import tempfile
+import urllib.parse
 from pathlib import Path
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 HOME        = Path.home()
 SKILLS_DIR  = HOME / ".claude/skills/resume-builder"
-JDS_DIR     = HOME / "Documents/JobSearch/JDs"
-APPS_DIR    = HOME / "Documents/JobSearch/Applications"
-ARCH_DIR    = HOME / "Documents/JobSearch/Archetypes"
+JDS_DIR     = HOME / "JobSearch/JDs"
+APPS_DIR    = HOME / "JobSearch/Applications"
+ARCH_DIR    = HOME / "JobSearch/Archetypes"
 LATEX_DIR   = SKILLS_DIR / "latex"
 SCRIPTS_DIR = SKILLS_DIR / "scripts"
 PROMPTS_DIR = SKILLS_DIR / "prompts"
+TRACKER_CSV = HOME / "JobSearch/tracker.csv"
 
-TEMPLATE_TEX  = LATEX_DIR / "template.tex"
-OUTPUT_TEX    = LATEX_DIR / "output.tex"
-BUILD_SH      = LATEX_DIR / "build.sh"
-STATE_FILE    = SCRIPTS_DIR / ".processed_jds.json"
-CONFIG_FILE   = SCRIPTS_DIR / "config.json"
-CLASSIFY_TMPL = PROMPTS_DIR / "classify_prompt.md"
-HEADLESS_TMPL = PROMPTS_DIR / "headless_prompt.md"
+TEMPLATE_TEX          = LATEX_DIR / "template.tex"
+OUTPUT_TEX            = LATEX_DIR / "output.tex"
+BUILD_SH              = LATEX_DIR / "build.sh"
+STATE_FILE            = SCRIPTS_DIR / ".processed_jds.json"
+CONFIG_FILE           = SCRIPTS_DIR / "config.json"
+HEADLESS_TMPL         = PROMPTS_DIR / "headless_prompt.md"
+COUNCIL_CLASSIFY_TMPL = PROMPTS_DIR / "council_classify_prompt.md"
+COUNCIL_KEYWORDS_TMPL = PROMPTS_DIR / "council_keywords_prompt.md"
 
-CLAUDE_BIN = "/Applications/c11.app/Contents/Resources/bin/claude"
-SKIP_FILES = {"example_jd.md"}
+CLAUDE_BIN  = "/Applications/c11.app/Contents/Resources/bin/claude"
+SKIP_FILES  = {"example_jd.md"}
 VALID_TYPES = {"AIMLEngineer", "DataScientist", "DataAnalyst", "ProductAnalyst"}
 
 
@@ -52,8 +59,6 @@ def parse_frontmatter(text):
             meta[k.strip()] = v.strip().strip('"').strip('[]')
     body = text[match.end():]
 
-    # Normalize: if web-clipper format (has `title:` but no `company:`/`role:`)
-    # extract from "Role at Company" or "Role - Company" pattern in title
     if "company" not in meta and "title" in meta:
         title = meta["title"]
         if " at " in title:
@@ -66,9 +71,46 @@ def parse_frontmatter(text):
             meta["company"] = company_part.strip()
         else:
             meta["role"] = title
-            meta["company"] = "Unknown"
+            # Fallback 1: extract company from ATS source URL
+            company_from_url = _extract_company_from_url(meta.get("source", ""))
+            # Fallback 2: look for "At [Company]," or "Why [Company]" in description field
+            company_from_desc = _extract_company_from_description(meta.get("description", ""))
+            meta["company"] = company_from_url or company_from_desc or "Unknown"
 
     return meta, body
+
+
+def _extract_company_from_url(url):
+    if not url:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host   = parsed.hostname or ""
+        parts  = [p for p in parsed.path.split('/') if p]
+        # Ashby:      jobs.ashbyhq.com/{company}/...
+        # Lever:      jobs.lever.co/{company}/...
+        # Greenhouse: boards.greenhouse.io/{company}/...
+        if any(ats in host for ats in ("ashbyhq.com", "lever.co", "greenhouse.io")) and parts:
+            return parts[0].capitalize()
+        # Workday: {company}.wd1.myworkdayjobs.com/...
+        if "myworkdayjobs.com" in host:
+            return host.split('.')[0].capitalize()
+    except Exception:
+        pass
+    return None
+
+
+def _extract_company_from_description(desc):
+    if not desc:
+        return None
+    for pattern in (r'At (\w+),', r'Why (\w+)\b', r'join (\w+) ', r'About (\w+)\b'):
+        m = re.search(pattern, desc[:500])
+        if m:
+            candidate = m.group(1)
+            # Skip generic words
+            if candidate.lower() not in {"us", "the", "our", "this", "a", "an"}:
+                return candidate
+    return None
 
 
 # ── State ──────────────────────────────────────────────────────────────────────
@@ -92,32 +134,233 @@ def get_unprocessed(state):
 
 
 # ── Claude calls ───────────────────────────────────────────────────────────────
-def call_claude(prompt, timeout=60):
-    """Call claude --print with bypassPermissions to prevent tool-use hangs."""
+def call_claude(prompt, timeout=60, model=None):
     env = os.environ.copy()
     env["HOME"] = str(HOME)
-    result = subprocess.run(
-        [
-            CLAUDE_BIN, "--print",
-            "--permission-mode", "bypassPermissions",
-            "--no-session-persistence",
-            prompt,
-        ],
-        capture_output=True, text=True, timeout=timeout, env=env
-    )
+    args = [
+        CLAUDE_BIN, "--print",
+        "--permission-mode", "bypassPermissions",
+        "--no-session-persistence",
+    ]
+    if model:
+        args += ["--model", model]
+    args.append(prompt)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env)
     if result.returncode != 0:
         raise RuntimeError(f"Claude exited {result.returncode}:\n{result.stderr[:800]}")
     return result.stdout.strip()
 
-def classify_role(jd_body):
-    template = CLASSIFY_TMPL.read_text()
-    prompt = template.replace("<<<JD_EXCERPT>>>", jd_body[:1200])
-    raw = call_claude(prompt, timeout=60)
-    for label in VALID_TYPES:
-        if label in raw:
-            return label
-    log(f"WARN: unexpected classification '{raw}', defaulting to DataScientist")
-    return "DataScientist"
+
+# ── AppleScript helpers ────────────────────────────────────────────────────────
+def _esc(s):
+    """Sanitize string for safe embedding in an AppleScript double-quoted string."""
+    return str(s).replace('\\', '').replace('"', "'").replace('\n', ' ').replace('\r', '')
+
+def run_applescript(script, timeout=320):
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.applescript', delete=False) as f:
+        f.write(script)
+        fname = f.name
+    try:
+        result = subprocess.run(["osascript", fname], capture_output=True, text=True, timeout=timeout)
+        return result.stdout.strip(), result.returncode
+    finally:
+        os.unlink(fname)
+
+
+# ── Council: role type classification ─────────────────────────────────────────
+def parse_council_classify_response(text):
+    result = {"role_type": None, "evidence_for": "", "evidence_against": "none", "confidence": "LOW"}
+    for line in text.strip().splitlines():
+        if line.startswith("ROLE_TYPE:"):
+            result["role_type"] = line.split(":", 1)[1].strip()
+        elif line.startswith("EVIDENCE_FOR:"):
+            result["evidence_for"] = line.split(":", 1)[1].strip()
+        elif line.startswith("EVIDENCE_AGAINST:"):
+            result["evidence_against"] = line.split(":", 1)[1].strip()
+        elif line.startswith("CONFIDENCE:"):
+            result["confidence"] = line.split(":", 1)[1].strip()
+    if result["role_type"] not in VALID_TYPES:
+        for vt in VALID_TYPES:
+            if vt in text:
+                result["role_type"] = vt
+                break
+        else:
+            result["role_type"] = "DataScientist"
+    return result
+
+def aggregate_classify_votes(votes):
+    answers    = [v["role_type"] for v in votes]
+    confs      = [v["confidence"] for v in votes]
+    counter    = Counter(answers)
+    recommendation, majority_count = counter.most_common(1)[0]
+    all_agree  = (majority_count == len(votes))
+    high_count = confs.count("HIGH")
+
+    if all_agree and high_count >= 2:
+        overall_conf, needs_user = "HIGH", False
+    else:
+        overall_conf = "MEDIUM" if (all_agree or high_count >= 1) else "LOW"
+        needs_user   = True
+
+    if all_agree:
+        summary = f"{high_count}/3 HIGH confidence"
+    else:
+        vote_str = ", ".join(f"{k}×{v}" for k, v in counter.most_common())
+        summary  = f"split vote ({vote_str})"
+
+    majority_votes   = [v for v in votes if v["role_type"] == recommendation]
+    evidence_for     = "; ".join(dict.fromkeys(v["evidence_for"]     for v in majority_votes))[:200]
+    evidence_against = "; ".join(dict.fromkeys(v["evidence_against"] for v in majority_votes))[:200]
+
+    return recommendation, overall_conf, needs_user, summary, evidence_for, evidence_against
+
+def ask_user_role_type(recommendation, overall_conf, summary, evidence_for, evidence_against):
+    rec  = _esc(recommendation)
+    ef   = _esc((evidence_for    or "N/A")[:120])
+    ea   = _esc((evidence_against or "none")[:120])
+    conf = _esc(f"{overall_conf} ({summary})")
+
+    script = "\n".join([
+        'set msg to "Confidence: ' + conf + '" & return & return & "Evidence for ' + rec + ': ' + ef + '" & return & return & "Evidence against: ' + ea + '"',
+        'set r1 to button returned of (display dialog msg with title "Resume Builder - Role Classification" buttons {"Use ' + rec + '", "Choose Different"} default button "Use ' + rec + '" giving up after 300)',
+        'if r1 is "Choose Different" then',
+        '    set chosen to choose from list {"AIMLEngineer", "DataScientist", "DataAnalyst", "ProductAnalyst"} with title "Resume Builder - Role Type" with prompt "Select the correct role type:" default items {"' + rec + '"}',
+        '    if chosen is false then',
+        '        return "' + rec + '"',
+        '    else',
+        '        return item 1 of chosen',
+        '    end if',
+        'else',
+        '    return "' + rec + '"',
+        'end if',
+    ])
+    out, _ = run_applescript(script)
+    return out if out in VALID_TYPES else recommendation
+
+def council_classify(jd_body, config):
+    n        = config.get("council_size", 3)
+    model    = config.get("council_model")
+    template = COUNCIL_CLASSIFY_TMPL.read_text()
+    prompt   = template.replace("<<<JD_EXCERPT>>>", jd_body[:2000])
+
+    def _classify_one(i):
+        raw  = call_claude(prompt, timeout=60, model=model)
+        return i, parse_council_classify_response(raw)
+
+    votes = []
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        futures = {ex.submit(_classify_one, i): i for i in range(n)}
+        for fut in as_completed(futures):
+            try:
+                i, vote = fut.result()
+                log(f"  Council {i+1}: {vote['role_type']} [{vote['confidence']}]")
+                votes.append(vote)
+            except Exception as e:
+                log(f"  Council call failed: {e}")
+
+    if not votes:
+        log("All council calls failed — defaulting to DataScientist")
+        return "DataScientist", False
+
+    recommendation, overall_conf, needs_user, summary, ev_for, ev_against = aggregate_classify_votes(votes)
+    log(f"Council verdict: {recommendation} | {overall_conf} | {summary}")
+
+    if not needs_user:
+        return recommendation, False
+
+    chosen = ask_user_role_type(recommendation, overall_conf, summary, ev_for, ev_against)
+    return chosen, True
+
+
+# ── Council: keyword evaluation ────────────────────────────────────────────────
+def parse_council_keywords_response(text):
+    result = {"approved": False, "missing_hard": [], "missing_soft": [], "confidence": "LOW"}
+    for line in text.strip().splitlines():
+        if line.startswith("APPROVED:"):
+            result["approved"] = line.split(":", 1)[1].strip().upper() == "YES"
+        elif line.startswith("MISSING_HARD:"):
+            val = line.split(":", 1)[1].strip()
+            result["missing_hard"] = [] if val.lower() == "none" else [k.strip() for k in val.split(",") if k.strip()]
+        elif line.startswith("MISSING_SOFT:"):
+            val = line.split(":", 1)[1].strip()
+            result["missing_soft"] = [] if val.lower() == "none" else [k.strip() for k in val.split(",") if k.strip()]
+        elif line.startswith("CONFIDENCE:"):
+            result["confidence"] = line.split(":", 1)[1].strip()
+    return result
+
+def aggregate_keywords_votes(votes):
+    approved_count   = sum(1 for v in votes if v["approved"])
+    confs            = [v["confidence"] for v in votes]
+    high_count       = confs.count("HIGH")
+    all_missing_hard = list(dict.fromkeys(k for v in votes for k in v["missing_hard"]))
+    all_missing_soft = list(dict.fromkeys(k for v in votes for k in v["missing_soft"]))
+    all_approved     = (approved_count == len(votes))
+
+    if all_approved and high_count >= 2:
+        overall_conf, needs_user = "HIGH", False
+    else:
+        overall_conf = "MEDIUM" if approved_count >= 2 else "LOW"
+        needs_user   = True
+
+    summary = f"{approved_count}/3 approved, {high_count}/3 HIGH"
+    return all_missing_hard, all_missing_soft, overall_conf, needs_user, summary
+
+def ask_user_keywords(missing_hard, missing_soft, overall_conf, summary):
+    combined = _esc(", ".join(missing_hard + missing_soft)[:200])
+    conf_str = _esc(f"{overall_conf} ({summary})")
+
+    script = "\n".join([
+        'set msg to "Confidence: ' + conf_str + '" & return & return & "Suggested additions: ' + combined + '" & return & return & "Add these to your application tracking?"',
+        'set r to button returned of (display dialog msg with title "Resume Builder - Keywords" buttons {"Add Missing", "Keep As-Is"} default button "Keep As-Is" giving up after 300)',
+        'return r',
+    ])
+    out, _ = run_applescript(script)
+    return out == "Add Missing"
+
+def council_evaluate_keywords(keywords_a, keywords_b, jd_body, config):
+    n        = config.get("council_size", 3)
+    model    = config.get("council_model")
+    timeout  = config.get("council_keywords_timeout", 120)
+    template = COUNCIL_KEYWORDS_TMPL.read_text()
+    prompt   = (
+        template
+        .replace("<<<KEYWORDS_A>>>", ", ".join(keywords_a))
+        .replace("<<<KEYWORDS_B>>>", ", ".join(keywords_b))
+        .replace("<<<JD_EXCERPT>>>",  jd_body[:1500])
+    )
+
+    def _keywords_one(i):
+        raw  = call_claude(prompt, timeout=timeout, model=model)
+        return i, parse_council_keywords_response(raw)
+
+    votes = []
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        futures = {ex.submit(_keywords_one, i): i for i in range(n)}
+        for fut in as_completed(futures):
+            try:
+                i, vote = fut.result()
+                log(f"  Keywords council {i+1}: approved={vote['approved']} [{vote['confidence']}]")
+                votes.append(vote)
+            except Exception as e:
+                log(f"  Keywords council call failed: {e}")
+
+    if not votes:
+        log("Keywords council failed — keeping extracted keywords")
+        return keywords_a, keywords_b
+
+    missing_hard, missing_soft, overall_conf, needs_user, summary = aggregate_keywords_votes(votes)
+    log(f"Keywords verdict: {overall_conf} | {summary}")
+
+    if not needs_user or (not missing_hard and not missing_soft):
+        return keywords_a, keywords_b
+
+    if ask_user_keywords(missing_hard, missing_soft, overall_conf, summary):
+        final_a = keywords_a + [k for k in missing_hard if k not in keywords_a]
+        final_b = keywords_b + [k for k in missing_soft if k not in keywords_b]
+        log(f"Keywords updated — added {len(missing_hard)} hard, {len(missing_soft)} soft")
+        return final_a, final_b
+
+    return keywords_a, keywords_b
 
 
 # ── Experience loading ─────────────────────────────────────────────────────────
@@ -140,21 +383,20 @@ def load_experience_content(filenames):
     return "\n\n---\n\n".join(parts)
 
 
-# ── Static LaTeX header (preamble + name + education — never changes) ──────────
+# ── Static LaTeX header ────────────────────────────────────────────────────────
 def build_static_header():
-    text = TEMPLATE_TEX.read_text()
+    text  = TEMPLATE_TEX.read_text()
     lines = text.splitlines(keepends=True)
     for i, line in enumerate(lines):
         if '% ── Skills' in line:
             return ''.join(lines[:i])
-    # Fallback: split at first \ressection{Skills}
     return text.split(r'\ressection{Skills}')[0]
 
 
 # ── Response parsing ───────────────────────────────────────────────────────────
 def extract_block(text, tag):
     pattern = rf'==={tag}===\n(.*?)\n===END {tag}==='
-    match = re.search(pattern, text, re.DOTALL)
+    match   = re.search(pattern, text, re.DOTALL)
     if not match:
         raise ValueError(f"Missing block: {tag}")
     return match.group(1).strip()
@@ -162,7 +404,7 @@ def extract_block(text, tag):
 
 # ── output.tex assembly ────────────────────────────────────────────────────────
 def write_output_tex(skills_latex, work_latex):
-    header = build_static_header()
+    header  = build_static_header()
     content = (
         header
         + "\n"
@@ -175,6 +417,17 @@ def write_output_tex(skills_latex, work_latex):
 
 
 # ── PDF build ──────────────────────────────────────────────────────────────────
+def _count_pdf_pages(pdf_path):
+    try:
+        r = subprocess.run(
+            ["mdls", "-name", "kMDItemNumberOfPages", pdf_path],
+            capture_output=True, text=True, timeout=10
+        )
+        m = re.search(r'= (\d+)', r.stdout)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
 def build_pdf(company_slug, role_type):
     result = subprocess.run(
         ["/bin/bash", str(BUILD_SH), company_slug, role_type, "V2"],
@@ -188,7 +441,7 @@ def build_pdf(company_slug, role_type):
 # ── Application note ───────────────────────────────────────────────────────────
 def save_application_note(meta, role_type, keywords_a, keywords_b, extrapolated, pdf_path, jd_filename):
     company  = meta.get("company", "Unknown")
-    role     = meta.get("role", "Unknown")
+    role     = meta.get("role",    "Unknown")
     date     = datetime.date.today().isoformat()
     slug     = re.sub(r'[^a-zA-Z0-9]', '', company)
     filename = f"{slug}_{role_type}_{date.replace('-', '')}.md"
@@ -221,15 +474,51 @@ resume: "[[Resumes/{pdf_name}]]"
     return filename
 
 
-# ── macOS notification ─────────────────────────────────────────────────────────
+# ── macOS notifications ────────────────────────────────────────────────────────
+def notify_start(company, jd_filename):
+    script = (
+        f'display notification "Processing {_esc(jd_filename)}" '
+        f'with title "Resume Builder — Starting for {_esc(company)}" '
+        f'sound name "Purr"'
+    )
+    subprocess.run(["osascript", "-e", script], capture_output=True)
+
 def notify(company, pdf_path):
     pdf_name = Path(pdf_path).name if pdf_path else "check log"
-    script = (
+    script   = (
         f'display notification "{pdf_name}" '
         f'with title "Resume Ready — {company}" '
         f'sound name "Glass"'
     )
     subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
+# ── Tracker CSV ────────────────────────────────────────────────────────────────
+def _flatten_extrapolated(extrapolated):
+    rows = []
+    for line in extrapolated.splitlines():
+        line = line.strip()
+        if not line.startswith("|") or "|---" in line or "Addition" in line:
+            continue
+        parts = [p.strip() for p in line.strip("|").split("|")]
+        if len(parts) >= 3 and parts[0]:
+            rows.append(f"{parts[0]}→{parts[1]} ASSUMES: {parts[2]}")
+    return " | ".join(rows)
+
+def save_tracker_csv(meta, role_type, keywords_a, keywords_b, extrapolated):
+    company  = meta.get("company", "Unknown")
+    role     = meta.get("role",    "Unknown")
+    date     = datetime.date.today().isoformat()
+    prep     = _flatten_extrapolated(extrapolated)
+    header   = ["date", "company", "role", "type", "status", "keywords_a", "keywords_b", "prep_notes"]
+    row      = [date, company, role, role_type, "Researching", "|".join(keywords_a), "|".join(keywords_b), prep]
+    exists   = TRACKER_CSV.exists()
+    with TRACKER_CSV.open("a", newline="") as f:
+        writer = csv.writer(f)
+        if not exists:
+            writer.writerow(header)
+        writer.writerow(row)
+    log("Saved → tracker.csv")
 
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -242,62 +531,72 @@ def log(msg):
 def process_jd(jd_path, config):
     log(f"Processing: {jd_path.name}")
 
-    text = jd_path.read_text()
-    meta, body = parse_frontmatter(text)
-    company     = meta.get("company", "Unknown")
+    text         = jd_path.read_text()
+    meta, body   = parse_frontmatter(text)
+    company      = meta.get("company", "Unknown")
     company_slug = re.sub(r'[^a-zA-Z0-9]', '', company) or "Unknown"
 
-    # Step 1 — classify (Claude micro-call, ~100 tokens)
-    log("Classifying role type...")
-    role_type = classify_role(body)
-    log(f"Role type: {role_type}")
+    notify_start(company, jd_path.name)
 
-    # Step 2 — check archetype, else load experience files
+    # Step 1 — council classify
+    log("Council classifying role type...")
+    role_type, prompted = council_classify(body, config)
+    log(f"Role type: {role_type}" + (" (user-confirmed)" if prompted else " (auto)"))
+
+    # Step 2 — archetype or experience files
     archetype = ARCH_DIR / f"{role_type}_summary.md"
     if archetype.exists():
         experience_content = archetype.read_text()
         log(f"Using archetype: {archetype.name}")
     else:
-        exp_files = select_experience_files(body.lower(), config)
+        exp_files          = select_experience_files(body.lower(), config)
         experience_content = load_experience_content(exp_files)
         log(f"Experience files: {exp_files}")
 
-    # Step 3 — load role requirements
-    role_file_name = config["role_files"][role_type]
+    # Step 3 — role requirements
+    role_file_name    = config["role_files"][role_type]
     role_requirements = (SKILLS_DIR / "roles" / role_file_name).read_text()
 
-    # Step 4 — build and send main prompt (single Claude call)
+    # Step 4 — main headless call
     log("Writing resume...")
-    candidate_name = os.environ.get("RESUME_CANDIDATE_NAME", "the candidate")
     headless = HEADLESS_TMPL.read_text()
-    prompt = (
+    prompt   = (
         headless
-        .replace("<<<CANDIDATE_NAME>>>", candidate_name)
-        .replace("<<<ROLE_TYPE>>>", role_type)
-        .replace("<<<COMPANY>>>", company)
-        .replace("<<<POSITION>>>", meta.get("role", "Unknown"))
-        .replace("<<<JD_TEXT>>>", body)
-        .replace("<<<ROLE_REQUIREMENTS>>>", role_requirements)
+        .replace("<<<ROLE_TYPE>>>",          role_type)
+        .replace("<<<COMPANY>>>",            company)
+        .replace("<<<POSITION>>>",           meta.get("role", "Unknown"))
+        .replace("<<<JD_TEXT>>>",            body)
+        .replace("<<<ROLE_REQUIREMENTS>>>",  role_requirements)
         .replace("<<<EXPERIENCE_CONTENT>>>", experience_content)
     )
     response = call_claude(prompt, timeout=600)
 
     # Step 5 — parse structured output
-    keywords_a  = [k.strip() for k in extract_block(response, "KEYWORDS_A").split(",") if k.strip()]
-    keywords_b  = [k.strip() for k in extract_block(response, "KEYWORDS_B").split(",") if k.strip()]
-    skills_tex  = extract_block(response, "SKILLS")
-    work_tex    = extract_block(response, "WORK_EXPERIENCE")
+    keywords_a   = [k.strip() for k in extract_block(response, "KEYWORDS_A").split(",") if k.strip()]
+    keywords_b   = [k.strip() for k in extract_block(response, "KEYWORDS_B").split(",") if k.strip()]
+    skills_tex   = extract_block(response, "SKILLS")
+    work_tex     = extract_block(response, "WORK_EXPERIENCE")
     extrapolated = extract_block(response, "EXTRAPOLATED")
 
-    # Step 6 — write output.tex and compile PDF
+    # Step 5.5 — council evaluate keywords
+    log("Council evaluating keywords...")
+    keywords_a, keywords_b = council_evaluate_keywords(keywords_a, keywords_b, body, config)
+
+    # Step 6 — compile PDF
     write_output_tex(skills_tex, work_tex)
     log("Building PDF...")
     pdf_path = build_pdf(company_slug, role_type)
     log(f"PDF → {pdf_path}")
+    pages = _count_pdf_pages(pdf_path)
+    if pages and pages > 1:
+        log(f"WARN: resume is {pages} pages — bullet budget exceeded, check output.tex")
 
     # Step 7 — save application note
     note = save_application_note(meta, role_type, keywords_a, keywords_b, extrapolated, pdf_path, jd_path.name)
     log(f"Saved → Applications/{note}")
+
+    # Step 7b — append to tracker CSV
+    save_tracker_csv(meta, role_type, keywords_a, keywords_b, extrapolated)
 
     # Step 8 — notify
     notify(company, pdf_path)
@@ -306,14 +605,13 @@ def process_jd(jd_path, config):
 
 
 def main():
-    # Allow manual invocation: python3 auto_resume.py path/to/jd.md [--force]
     force_path = None
     if len(sys.argv) > 1 and sys.argv[1] not in ("--reset",):
         force_path = Path(sys.argv[1]).expanduser()
 
     if len(sys.argv) > 1 and sys.argv[1] == "--reset":
         target = sys.argv[2] if len(sys.argv) > 2 else None
-        state = load_state()
+        state  = load_state()
         if target:
             state.pop(target, None)
             log(f"Reset state for: {target}")
@@ -339,13 +637,12 @@ def main():
         try:
             process_jd(jd_path, config)
             state[jd_path.name] = {
-                "mtime": mtime,
+                "mtime":        mtime,
                 "processed_at": datetime.datetime.now().isoformat()
             }
             save_state(state)
         except Exception as e:
             log(f"ERROR — {jd_path.name}: {e}")
-            # Leave out of state so it retries next trigger
 
 
 if __name__ == "__main__":

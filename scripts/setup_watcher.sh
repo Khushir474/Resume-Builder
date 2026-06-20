@@ -12,7 +12,7 @@ case "$ACTION" in
     chmod +x "$SCRIPTS/run_auto.sh"
     launchctl unload "$PLIST" 2>/dev/null || true
     launchctl load "$PLIST"
-    echo "Watcher installed. Watching ~/Documents/JobSearch/JDs for new .md files."
+    echo "Watcher installed. Watching ~/JobSearch/JDs for new .md files."
     echo "Logs: $SCRIPTS/auto_resume.log"
     ;;
 
@@ -27,9 +27,9 @@ case "$ACTION" in
 
   test)
     # Dry-run against the most recently modified JD
-    LATEST=$(ls -t ~/Documents/JobSearch/JDs/*.md 2>/dev/null | grep -v example_jd | head -1)
+    LATEST=$(ls -t ~/JobSearch/JDs/*.md 2>/dev/null | grep -v example_jd | head -1)
     if [ -z "$LATEST" ]; then
-      echo "No JD files found in ~/Documents/JobSearch/JDs/"
+      echo "No JD files found in ~/JobSearch/JDs/"
       exit 1
     fi
     echo "Testing against: $LATEST"

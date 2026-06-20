@@ -1,65 +1,46 @@
 ---
 name: resume-builder
-description: Tailors your resume to a specific job description. Detects role type, selects the 3–4 most relevant experience entries, runs a 2-step ATS workflow: keyword extraction → full resume, and optionally compiles a PDF via LaTeX. Use when you paste a JD or say "tailor my resume", "customize for this job", "update resume for [role/company]", "rebuild my resume", or "apply to [company]".
+description: Tailors Khushi Ranganatha's resume to a specific job description. Detects role type, selects experience entries, runs a 2-step ATS workflow, compiles a PDF, and saves tracking data to the Obsidian vault and CSV. Use when Khushi pastes a JD, passes a vault JD file path, or says "tailor my resume", "customize for this job", "update resume for [role/company]", "rebuild my resume", or "apply to [company]".
 ---
 
 # Resume Builder — Orchestrator
 
-## What This Skill Does
-
-Given a job description, this skill:
-1. Classifies the target role type
-2. Loads the 3–4 most relevant experience entries (token-efficient)
-3. Runs the role-specific 2-step ATS workflow: keyword extraction → full resume
-4. Optionally builds a PDF from the LaTeX template
-5. Saves tracking data so nothing is lost after the session
-
-**Trigger phrases:** "tailor my resume", "customize for this job", "update my resume for [role]", "rebuild my resume", "apply to [company]", paste a JD, or pass a path to a JD file from your vault.
-
----
-
 ## Configuration
 
-Update these two paths to match your local setup before first use.
-
 ```
-V1 tracker path:  ~/Documents/ResumePrepNotes/tracker.csv
-V2 vault path:    ~/Documents/JobSearch/
+V1 tracker path:  ~/JobSearch/tracker.csv
+V2 vault path:    ~/JobSearch/
 ```
-
-**V1 tracker path** — required for all users. The CSV tracker is saved here after every run.
-**V2 vault path** — required only if using Obsidian (V2 mode). Leave blank if not using V2. See README for setup instructions.
 
 ---
 
 ## Mode Detection
 
-Determine which mode to use based on the skill argument before doing anything else:
+Determine mode from the skill argument before doing anything else:
 
 | Argument | Mode |
 |---|---|
 | Path to an existing `.md` file | **V2** — read JD text from that file |
 | Raw pasted text | **V1** — standard flow |
-| No argument, V2 vault configured | Ask: "Use most recently modified file in `JDs/`? [Yes / Paste instead]" |
-| No argument, no vault | Prompt the user to paste a JD |
-| `--compile [RoleType]` | **Compile mode** — skip to the `--compile Mode` section at the bottom |
+| No argument, vault exists | Ask: "Use most recently modified file in `JDs/`? [Yes / Paste instead]" |
+| `--compile [RoleType]` | **Compile mode** — skip to `--compile Mode` section below |
 
 ---
 
 ## Step 0 — Archetype Check (V2 only)
 
-*Skip this step if running in V1 mode.*
+*Skip if V1 mode.*
 
-Check if `[V2 vault]/Archetypes/[RoleType]_summary.md` exists. Role type is not yet known — run Step 1 first (classify role), then return here before loading experience files.
+After classifying role type in Step 1, check if `~/JobSearch/Archetypes/[RoleType]_summary.md` exists.
 
-- **Archetype found:** Load it. Report: "Loading [RoleType] archetype (compiled [date], N=[count] applications) — skipping raw experience file loading." Skip Step 2 and proceed with archetype context active.
-- **No archetype:** Continue to Step 2 as normal.
+- **Found:** Load it. Report: "Loading [RoleType] archetype (compiled [date], N=[count] applications) — skipping raw experience file loading." Skip Step 2.
+- **Not found:** Continue to Step 2 as normal.
 
 ---
 
 ## Step 1 — Role Type Classification
 
-Read the JD. Using semantic understanding (not keyword matching), classify it into one of these four types:
+Read the JD. Classify into one of four types:
 
 | Type | Core Emphasis |
 |---|---|
@@ -68,15 +49,12 @@ Read the JD. Using semantic understanding (not keyword matching), classify it in
 | **Data Analyst** | SQL-driven analysis and reporting — dashboards, KPIs, business intelligence, stakeholder communication |
 | **Product Analyst / Ops** | Cross-functional execution — PDLC, GTM, roadmaps, sprint coordination, delivery operations |
 
-State your classification with a one-line rationale, then use **AskUserQuestion** with:
+State classification with a one-line rationale, then use **AskUserQuestion**:
 - Question: `"This reads like a [TYPE] role — [one-line rationale]. Which type should I use?"`
 - Option 1 (recommended): `"Yes, [Classified Type]"`
-- Options 2–4: the other three role types in order
-- (Built-in "Other" handles any edge case)
+- Options 2–4: the other three types in order
 
-If ambiguous between two types, set both as the first two options with the more likely one marked recommended.
-
-Role prompt files (absolute paths):
+Role prompt files:
 - AI/ML Engineer → `~/.claude/skills/resume-builder/roles/ai_ml_engineer.md`
 - Data Scientist → `~/.claude/skills/resume-builder/roles/data_scientist.md`
 - Data Analyst → `~/.claude/skills/resume-builder/roles/data_analyst.md`
@@ -84,153 +62,119 @@ Role prompt files (absolute paths):
 
 ---
 
-## Step 1.5 — Delta Keywords (V2 only, if archetype was loaded)
+## Step 1.5 — Delta Keywords (V2 only, if archetype loaded)
 
-*Skip this step if running in V1 mode or if no archetype was loaded in Step 0.*
+*Skip if V1 or no archetype.*
 
-The archetype contains a `### known_keywords` field (all keywords seen in prior JDs of this type).
-
-- Pre-populate List A and List B using the archetype's `### Top Required Skills` and `### Common Soft Keywords` sections.
-- Extract only keywords from this JD that are **not** already in `known_keywords` — these are the delta.
-- At the Step 3 keyword gate: present the archetype-sourced keywords as pre-accepted, show only the delta for user review.
+- Pre-populate List A and B from the archetype's `### Top Required Skills` and `### Common Soft Keywords`.
+- Extract only keywords from this JD **not** in `known_keywords` — these are the delta.
+- At Gate 2: present archetype-sourced keywords as pre-accepted, show only delta for review.
 - Flag: "Pre-loaded [N] keywords from [RoleType] archetype. New keywords in this JD: [M]"
 
 ---
 
-## Step 2 — Selective Experience Loading (Token Efficiency)
+## Step 2 — Selective Experience Loading
 
-*Skip this step entirely if an archetype was loaded in Step 0 — the archetype replaces it.*
+*Skip if an archetype was loaded in Step 0.*
 
-**Do not load all experience files every time.** Based on the role type and JD domain, select 3–4 of the most relevant entries.
+**Always load iTradeNetwork, LiA, and Digitas — required for every resume.** Load 1 optional 4th file based on JD domain fit.
 
-**Default load priority: [PRIMARY_COMPANY] → [SECONDARY_COMPANY] → [TERTIARY_COMPANY] → everything else.**
-Selection is always about which bullets best match the JD's language — load whichever entries give you the strongest phrase-level match, regardless of heuristics.
-
-Quick relevance map — replace company labels with your actual file names (without `.md`):
-
-| JD Domain | Likely relevant entries |
+| JD Domain | Optional 4th entry |
 |---|---|
-| LLM / RAG / agentic AI | [company_a], [company_b], [company_c] |
-| MLOps / production ML | [company_a], [company_b], [company_c] |
-| SQL / dashboards / BI | [company_a], [company_b], [company_c] |
-| NLP / text processing | [company_a], [company_b], [company_c] |
-| Product / GTM / ops | [company_a], [company_b], [company_c] |
-| Data science / modeling | [company_a], [company_b], [company_c] |
-| Customer analytics | [company_a], [company_b], [company_c] |
+| LLM / RAG / agentic AI | LexLead.ai |
+| MLOps / production ML | LexLead.ai |
+| NLP / text processing | TEKSystems |
+| Product / GTM / ops | Galaara |
+| Data science / modeling | LexLead.ai |
+| Customer analytics / marketing | Galaara |
+| SQL / dashboards / BI | skip — core three sufficient |
 
-**Session reuse:** If experience files and a role prompt are already loaded from a previous run this session, do not re-read them. State: "Reusing experience context from previous run — only the JD has changed." Then proceed directly to Step 1 of the role prompt with the new JD.
+**Session reuse:** If files are already loaded from a prior run this session, do not re-read. State: "Reusing experience context — only the JD has changed." Proceed to role prompt Step 1.
 
-Experience file paths — update these with your actual file names:
+Experience files:
 ```
-~/.claude/skills/resume-builder/experience/[primary_company].md   ← always load
-~/.claude/skills/resume-builder/experience/[company_b].md
-~/.claude/skills/resume-builder/experience/[company_c].md
-~/.claude/skills/resume-builder/experience/[company_d].md
-~/.claude/skills/resume-builder/experience/[company_e].md
-~/.claude/skills/resume-builder/experience/[company_f].md
+~/.claude/skills/resume-builder/experience/itradenetwork.md   ← always load
+~/.claude/skills/resume-builder/experience/lia.md             ← always load
+~/.claude/skills/resume-builder/experience/digitas.md         ← always load
+~/.claude/skills/resume-builder/experience/lexlead_ai.md
+~/.claude/skills/resume-builder/experience/galaara.md
+~/.claude/skills/resume-builder/experience/teksystems.md
 ```
 
 ---
 
 ## Step 3 — Run the Role Prompt (2-Step Workflow)
 
-Read the matching role file. It contains two steps:
+Read the matching role file.
 
-**Step 1 of role prompt:** Extract keyword lists (List A: hard keywords, List B: soft keywords, List C if applicable: business/process terms). Output the lists. Then use **AskUserQuestion** with:
+**Step 1 of role prompt:** Extract keyword lists (List A: hard keywords, List B: soft keywords, List C if applicable). Output the lists. If the JD names no specific tools in List A, fill in widely-adopted tools for that role type in the 2026 market — flag inferred tools clearly. Then use **AskUserQuestion**:
 - Question: `"Do you want to adjust the keyword lists before I write?"`
 - Option 1 (recommended): `"Looks good — write the resume"`
-- Option 2: `"Add keywords"`
-- Option 3: `"Remove keywords"`
-- Option 4: `"Add and remove keywords"`
+- Options 2–4: Add / Remove / Add and remove (user types changes in notes field)
 
-**If the JD names no specific tools in List A** (e.g. no BI tool, no cloud platform, no language), fill in the most widely adopted tools for that role type in the 2026 market — do not leave List A empty. Flag any inferred tools clearly so the user can adjust them at the keyword gate.
-
-For options 2–4, the user types their changes in the built-in "Other" notes field. Apply their input and proceed.
-
-**Reuse option (V2 only, if archetype was loaded):**
-Before writing the resume, use **AskUserQuestion** with:
-- Question: `"Generate fresh, or start from the most similar prior resume?"`
-- Option 1 (recommended): `"Generate fresh"`
-- Option 2: `"Adapt from most similar prior"` → scan `[V2 vault]/Applications/` for notes of the same `type:` field, pick the one with highest keyword overlap with current List A, load it as the base, generate only the delta changes
-
-**Step 2 of role prompt:** Write the full tailored resume using the role file's ATS rules, extrapolation guidance, writing style, and format. All selected experience entries (or archetype) are in context — draw bullets from them and adapt phrasing to match the JD's exact language.
+**Step 2 of role prompt:** Write the full tailored resume using role file ATS rules, extrapolation guidance, writing style, and format. Draw bullets from loaded experience entries (or archetype) and match JD language exactly.
 
 **TERMINAL OUTPUT RULE — strictly enforced:**
-Do NOT print the full resume content to the terminal. After composing it internally (to use in Step 4), output ONLY:
-1. The `EXTRAPOLATED — PREP BEFORE INTERVIEW` table (as specified by the role file)
-2. One line: `"Resume composed. Build the PDF?"` → then trigger Step 4
+Do NOT print resume content. After composing internally, output ONLY:
+1. The `EXTRAPOLATED — PREP BEFORE INTERVIEW` table
+2. Proceed immediately to Step 4 — no gate.
 
 ---
 
-## Step 4 — Build PDF (Optional)
+## Step 4 — Build PDF (Automatic)
 
-Use **AskUserQuestion** with:
-- Question: `"Build the PDF?"`
-- Option 1 (recommended): `"Yes, build PDF"`
-- Option 2: `"No, text only"`
+No confirmation required. Build immediately after Step 3.
 
-If yes:
+1. **Never modify `latex/template.tex`.** Write the tailored resume to `~/.claude/skills/resume-builder/latex/output.tex` only.
+2. Run the build script — it compiles, moves, and prints the final path:
 
-**V1 mode:** Write the tailored resume content to `~/.claude/skills/resume-builder/latex/output.tex`, then run:
 ```bash
-cd ~/.claude/skills/resume-builder/latex && \
-/Library/TeX/texbin/pdflatex -interaction=nonstopmode output.tex && \
-mv output.pdf ~/Documents/[YOUR_OUTPUT_FOLDER]/[YOUR_NAME]_Resume_[CompanyName]_[RoleType]_$(date +%Y%m%d).pdf
+~/.claude/skills/resume-builder/latex/build.sh [Company] [RoleType] [V1|V2]
 ```
 
-**V2 mode (vault configured):** Same compile step, but move the PDF to `[V2 vault]/Resumes/` instead:
-```bash
-mv output.pdf [V2_VAULT_PATH]/Resumes/[YOUR_NAME]_Resume_[CompanyName]_[RoleType]_$(date +%Y%m%d).pdf
-```
+- `[Company]` — company name, no spaces (e.g. `Fora`, `BookOfTheMonth`, `Taktile`, `Unknown`)
+- `[RoleType]` — shortcode: `DataAnalyst`, `DataScientist`, `AIMLEngineer`, `ProductAnalyst`
+- `[V1|V2]` — `V2` saves to vault Resumes folder; `V1` saves to Career/Resume/resume-builder-outputs
 
-**Never modify `latex/template.tex`.** Only write to `latex/output.tex`.
-
-Output only the final PDF path to the terminal — no resume content.
-
-Filename rules:
-- Company + role known: `[YOUR_NAME]_Resume_Acme_DataAnalyst_20260615.pdf`
-- Company unknown: `[YOUR_NAME]_Resume_DataAnalyst_20260615.pdf`
-- Role type shortcodes: `DataAnalyst`, `DataScientist`, `AIMLEngineer`, `ProductAnalyst`
+3. Output only the path printed by the script — no resume content.
 
 ---
 
-## Step 5 — Save Tracker
+## Step 5 — Save Tracking Data
 
-Runs unconditionally after Step 3 (regardless of PDF choice).
+Runs unconditionally after Step 3 (regardless of PDF).
 
-### V1 — Append to CSV (always runs)
+### V1 — Append to CSV
 
-Append one row to the V1 tracker path configured above.
-
-**If the file doesn't exist:** create it with this header row first:
+Append one row to `~/JobSearch/tracker.csv`. If the file doesn't exist, create it with header:
 ```
 date,company,role,type,status,keywords_a,keywords_b,prep_notes
 ```
 
-**Row format:**
+Row format:
 ```
 [YYYY-MM-DD],[Company or "Unknown"],[Job Title],[RoleType],Researching,[List A pipe-separated],[List B pipe-separated],[flattened prep notes]
 ```
 
-Flatten the EXTRAPOLATED table into the `prep_notes` cell: for each row format as `[addition]→[outcome] [ASSUMES: assumption]`, join all with ` | `.
+Flatten EXTRAPOLATED table into `prep_notes`: for each row write `[addition]→[outcome] ASSUMES: [assumption]`, join with ` | `.
 
 Output: `"Saved → tracker.csv"`
 
-### V2 — Write Application Note (runs when V2 vault is configured)
+### V2 — Write Application Note
 
-Write `[V2 vault]/Applications/[Company]_[RoleType]_[YYYYMMDD].md`:
+Write `~/JobSearch/Applications/[Company]_[RoleType]_[YYYYMMDD].md`:
 
 ```markdown
 ---
 company: [Company or "Unknown"]
-role: [Job Title from JD]
+role: [Job Title]
 type: [DataAnalyst | DataScientist | AIMLEngineer | ProductAnalyst]
 date: [YYYY-MM-DD]
 status: Researching
 keywords_a: [List A pipe-separated]
 keywords_b: [List B pipe-separated]
-jd_note: "[[JDs/[source filename if V2 mode, else leave blank]]]"
-resume: "[[Resumes/[PDF filename if built, else leave blank]]]"
+jd_note: "[[JDs/[source filename if V2, else blank]]]"
+resume: "[[Resumes/[PDF filename if built, else blank]]]"
 ---
 
 # [Company] — [Role]
@@ -242,7 +186,7 @@ resume: "[[Resumes/[PDF filename if built, else leave blank]]]"
 
 ## Interview Prep
 
-[EXTRAPOLATED table, full format as output by the role file]
+[EXTRAPOLATED table, full format]
 ```
 
 Output: `"Saved → Applications/[filename].md"`
@@ -252,41 +196,37 @@ Output: `"Saved → Applications/[filename].md"`
 ## --compile Mode
 
 Triggered by: `/resume-builder --compile [RoleType]`
-
 Valid values: `DataAnalyst`, `DataScientist`, `AIMLEngineer`, `ProductAnalyst`
+Requires V2 vault.
 
-Requires V2 vault to be configured. Reads all accumulated application data for the given role type and distills it into a single archetype file that future runs load instead of all experience files.
-
-**Process:**
-1. Read all `.md` files in `[V2 vault]/Applications/` where the `type:` frontmatter field matches `[RoleType]`
-2. For each application note: collect `keywords_a` and `keywords_b` values; load the linked `jd_note` file if it exists (for JD language pattern analysis)
+1. Read all `.md` files in `~/JobSearch/Applications/` where `type:` matches `[RoleType]`
+2. For each note: collect `keywords_a`, `keywords_b`; load linked `jd_note` if it exists
 3. Tally keyword frequencies across all N notes
-4. Compare all unique `keywords_a` terms against the content of `~/.claude/skills/resume-builder/experience/*.md` — flag terms that appear in 5+ JDs but are absent from all experience files
-5. Write `[V2 vault]/Archetypes/[RoleType]_summary.md`:
+4. Compare all unique `keywords_a` against `~/.claude/skills/resume-builder/experience/*.md` — flag terms in 5+ JDs absent from all experience files
+5. Write `~/JobSearch/Archetypes/[RoleType]_summary.md`:
 
 ```markdown
 ## [RoleType] Archetype — compiled [YYYY-MM-DD] (N=[count] applications)
 
 ### known_keywords
-[all unique keywords_a terms across all N applications, pipe-separated — used by Step 1.5 for delta detection on future runs]
+[all unique keywords_a across N applications, pipe-separated]
 
 ### Top Required Skills (JD frequency)
-[top 15 keywords_a terms with count, sorted descending: Term X/N · Term X/N · ...]
+[top 15 keywords_a with count, sorted descending]
 
 ### Common Soft Keywords
-[top 8 keywords_b terms with count: Term X/N · ...]
+[top 8 keywords_b with count]
 
 ### JD Language Patterns
-[2–4 observations about recurring phrases or framings found in the linked JD notes]
+[2–4 observations about recurring phrases in linked JD notes]
 
 ### Experience File Priority
-[rank experience files by relevance to this role type, based on keyword overlap — replaces the static relevance map in Step 2 for future V2 runs]
+[rank experience files by keyword overlap — replaces static relevance map for future V2 runs]
 
 ### Skill Gap — Missing from Your Experience Files
-Skills appearing in 5+ JDs not found in any experience entry:
-- [term] ([count]/N) — [absent / partially covered in [company]]
+Skills in 5+ JDs not in any experience entry:
+- [term] ([count]/N)
 ...
-
 Upskilling priority: [ranked list, highest-frequency gap first]
 ```
 
@@ -299,8 +239,7 @@ Output: `"Archetype written → Archetypes/[RoleType]_summary.md ([N] applicatio
 | File | Purpose |
 |---|---|
 | `roles/*.md` | Role-specific ATS + writing prompt (4 types) |
-| `experience/*.md` | Bullet libraries per company (one file per job) — gitignored, personal |
-| `latex/template.tex` | LaTeX base template — **never modified by skill** |
-| `latex/output.tex` | Ephemeral per-run output file — gitignored, safe to overwrite |
-| `vault_template/` | Copy this folder to `~/Documents/JobSearch/` to bootstrap your V2 vault |
-| `archive/` | Deprecated or reference files |
+| `experience/*.md` | Bullet libraries per company (6 entries) |
+| `latex/template.tex` | LaTeX base template — **never modified** |
+| `latex/output.tex` | Ephemeral per-run output — safe to overwrite |
+| `~/JobSearch/` | V2 Obsidian vault |
