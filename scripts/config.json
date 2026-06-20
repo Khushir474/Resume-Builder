@@ -1,0 +1,24 @@
+{
+  "always_load": ["itradenetwork", "lia", "digitas"],
+  "optional_fourth": {
+    "lexlead_ai": [
+      "llm", "rag", "agentic", "langchain", "langgraph", "mlops",
+      "production ml", "data science", "modeling", "generative ai",
+      "genai", "multimodal", "vector", "embedding", "llmops"
+    ],
+    "teksystems": [
+      "nlp", "text processing", "text extraction",
+      "document processing", "information extraction", "ocr"
+    ],
+    "galaara": [
+      "product", "gtm", "go-to-market", "marketing",
+      "customer analytics", "e-commerce", "growth", "retention"
+    ]
+  },
+  "role_files": {
+    "AIMLEngineer": "ai_ml_engineer.md",
+    "DataScientist": "data_scientist.md",
+    "DataAnalyst": "data_analyst.md",
+    "ProductAnalyst": "product_analyst_ops.md"
+  }
+}

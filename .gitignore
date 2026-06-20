@@ -224,3 +224,15 @@ experience/*.md
 
 # Auto-generated per-run LaTeX resume output — never committed
 latex/output.tex
+latex/output.aux
+latex/output.log
+latex/output.out
+latex/*.pdf
+
+# Auto-pipeline runtime files
+scripts/.processed_jds.json
+scripts/auto_resume.log
+
+# macOS / editor
+.DS_Store
+.Rhistory
